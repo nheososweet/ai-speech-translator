@@ -16,18 +16,12 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import {
-  Clock3Icon,
-  FileTextIcon,
-  MailIcon,
-  MicIcon,
-  TerminalIcon,
-} from "lucide-react";
+import { Clock3Icon, MicIcon, TerminalIcon } from "lucide-react";
 
 const appNav = {
   main: [
     {
-      title: "Không gian làm việc",
+      title: "Phiên dịch",
       href: "/workspace",
       icon: MicIcon,
     },
@@ -38,16 +32,16 @@ const appNav = {
     },
   ],
   support: [
-    {
-      title: "Mẫu biên bản",
-      href: "/history",
-      icon: FileTextIcon,
-    },
-    {
-      title: "Nhật ký email",
-      href: "/history",
-      icon: MailIcon,
-    },
+    // {
+    //   title: "Mẫu biên bản",
+    //   href: "/history",
+    //   icon: FileTextIcon,
+    // },
+    // {
+    //   title: "Nhật ký email",
+    //   href: "/history",
+    //   icon: MailIcon,
+    // },
   ],
   user: {
     name: "Điều phối viên",
@@ -63,20 +57,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              size="lg"
-              asChild
-              isActive={pathname === "/workspace"}
-            >
-              <Link href="/workspace">
+            <SidebarMenuButton size="lg" asChild>
+              <div>
                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
                   <TerminalIcon className="size-4" />
                 </div>
                 <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">Phiên dịch AI</span>
-                  <span className="truncate text-xs">Điều hành cuộc họp</span>
+                  <span className="truncate font-medium">
+                    Hệ thống phiên dịch
+                  </span>
+                  <span className="truncate text-xs">Âm thanh thông minh</span>
                 </div>
-              </Link>
+              </div>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -111,7 +103,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </SidebarGroupContent>
         </SidebarGroup>
 
-        <SidebarGroup className="mt-auto">
+        {/* <SidebarGroup className="mt-auto">
           <SidebarGroupLabel>Tiện ích nhanh</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -127,7 +119,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               ))}
             </SidebarMenu>
           </SidebarGroupContent>
-        </SidebarGroup>
+        </SidebarGroup> */}
       </SidebarContent>
       <SidebarFooter>
         <div className="rounded-md border border-sidebar-border bg-sidebar-accent/50 px-3 py-2 text-xs">

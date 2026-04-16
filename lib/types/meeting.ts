@@ -40,9 +40,12 @@ export interface MeetingRecord {
   processingStatus: ProcessingStatus
   emailStatus: EmailStatus
   rawTranscript: string
+  refinedTranscript?: string
   segments: TranscriptSegment[]
   minutes: string
   speakerSummaries: SpeakerSummary[]
   emailLogs: MeetingEmailLog[]
   audioUrl?: string
+  apiRecordId?: number
+  reportUrl?: string
 }

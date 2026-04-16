@@ -1,369 +1,778 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import axios from "axios";
 import {
-  ArrowRightIcon,
   AudioLinesIcon,
-  CircleAlertIcon,
-  CircleCheckIcon,
+  CopyIcon,
+  DownloadIcon,
+  FileTextIcon,
   LoaderCircleIcon,
-  SearchIcon,
+  MailIcon,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { z } from "zod";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
-import { Input } from "@/components/ui/input";
-import { meetingRecords } from "@/lib/mock/meetings";
-import type { MeetingRecord, ProcessingStatus } from "@/lib/types/meeting";
+type ExternalRecord = {
+  id: number;
+  create_time: string;
+  audio_url: string;
+  transcribe_url: string;
+  report: string | null;
+  filename: string;
+};
 
 const formatter = new Intl.DateTimeFormat("vi-VN", {
   dateStyle: "medium",
   timeStyle: "short",
 });
 
-function resolveStatus(status: ProcessingStatus): {
-  label: string;
-  Icon: LucideIcon;
-  spin?: boolean;
-  className: string;
-} {
-  switch (status) {
-    case "completed":
-      return {
-        label: "Hoàn tất",
-        Icon: CircleCheckIcon,
-        className: "text-emerald-600 dark:text-emerald-400",
-      };
-    case "processing":
-      return {
-        label: "Đang xử lý",
-        Icon: LoaderCircleIcon,
-        spin: true,
-        className: "text-amber-600 dark:text-amber-400",
-      };
-    case "error":
-      return {
-        label: "Lỗi",
-        Icon: CircleAlertIcon,
-        className: "text-rose-600 dark:text-rose-400",
-      };
-    case "uploading":
-      return {
-        label: "Đang tải lên",
-        Icon: LoaderCircleIcon,
-        spin: true,
-        className: "text-sky-600 dark:text-sky-400",
-      };
-    default:
-      return {
-        label: "Chờ xử lý",
-        Icon: AudioLinesIcon,
-        className: "text-muted-foreground",
-      };
-  }
-}
-
-function resolveEmailLabel(record: MeetingRecord): {
-  label: string;
-  className: string;
-} {
-  switch (record.emailStatus) {
-    case "sent":
-      return {
-        label: "Đã gửi email",
-        className:
-          "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-      };
-    case "failed":
-      return {
-        label: "Gửi email lỗi",
-        className:
-          "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
-      };
-    default:
-      return {
-        label: "Chưa gửi email",
-        className: "bg-muted text-muted-foreground",
-      };
-  }
-}
-
-function formatDuration(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainSeconds = seconds % 60;
-  return `${minutes}m ${String(remainSeconds).padStart(2, "0")}s`;
-}
+const recipientEmailsSchema = z
+  .string()
+  .trim()
+  .min(1, "Vui lòng nhập ít nhất 1 email người nhận.")
+  .transform((input) =>
+    input
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0),
+  )
+  .pipe(
+    z
+      .array(z.string().email("Danh sách email có địa chỉ không hợp lệ."))
+      .min(1, "Vui lòng nhập ít nhất 1 email người nhận."),
+  );
 
 export default function HistoryPage() {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | ProcessingStatus>(
-    "all",
+  const [previewTranscriptByRecord, setPreviewTranscriptByRecord] = useState<
+    Record<number, string>
+  >({});
+  const [loadingTranscriptRecordId, setLoadingTranscriptRecordId] = useState<
+    number | null
+  >(null);
+  const [previewAudioRecordId, setPreviewAudioRecordId] = useState<
+    number | null
+  >(null);
+  const [previewTranscriptRecordId, setPreviewTranscriptRecordId] = useState<
+    number | null
+  >(null);
+  const [previewReportByRecord, setPreviewReportByRecord] = useState<
+    Record<number, string>
+  >({});
+  const [loadingReportRecordId, setLoadingReportRecordId] = useState<
+    number | null
+  >(null);
+  const [previewReportRecordId, setPreviewReportRecordId] = useState<
+    number | null
+  >(null);
+  const [sendEmailRecordId, setSendEmailRecordId] = useState<number | null>(
+    null,
   );
-  const [sourceFilter, setSourceFilter] = useState<
-    "all" | MeetingRecord["inputSource"]
-  >("all");
-  const [sortBy, setSortBy] = useState<
-    "newest" | "oldest" | "duration_desc" | "duration_asc"
-  >("newest");
+  const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
+  const [emailValidationError, setEmailValidationError] = useState<
+    string | null
+  >(null);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [actionToast, setActionToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const metrics = useMemo(() => {
+  const recordsQuery = useQuery({
+    queryKey: ["records"],
+    queryFn: async () => {
+      const response = await axios.get<{ records: ExternalRecord[] }>(
+        "/api/records",
+      );
+      return response.data.records;
+    },
+  });
+
+  const recordMetrics = useMemo(() => {
+    const records = recordsQuery.data ?? [];
+
     return {
-      total: meetingRecords.length,
-      completed: meetingRecords.filter(
-        (meeting) => meeting.processingStatus === "completed",
-      ).length,
-      processing: meetingRecords.filter(
-        (meeting) =>
-          meeting.processingStatus === "processing" ||
-          meeting.processingStatus === "uploading",
-      ).length,
-      error: meetingRecords.filter(
-        (meeting) => meeting.processingStatus === "error",
-      ).length,
+      total: records.length,
+      withReport: records.filter((record) => Boolean(record.report)).length,
+      withoutReport: records.filter((record) => !record.report).length,
+    };
+  }, [recordsQuery.data]);
+
+  const activeTranscriptRecord = useMemo(() => {
+    if (!previewTranscriptRecordId) {
+      return null;
+    }
+
+    return (
+      recordsQuery.data?.find(
+        (record) => record.id === previewTranscriptRecordId,
+      ) ?? null
+    );
+  }, [previewTranscriptRecordId, recordsQuery.data]);
+
+  const selectedSendEmailRecord = useMemo(() => {
+    if (!sendEmailRecordId) {
+      return null;
+    }
+
+    return recordsQuery.data?.find((r) => r.id === sendEmailRecordId) ?? null;
+  }, [sendEmailRecordId, recordsQuery.data]);
+
+  const activeReportRecord = useMemo(() => {
+    if (!previewReportRecordId) {
+      return null;
+    }
+
+    return (
+      recordsQuery.data?.find(
+        (record) => record.id === previewReportRecordId,
+      ) ?? null
+    );
+  }, [previewReportRecordId, recordsQuery.data]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
     };
   }, []);
 
-  const filteredMeetings = useMemo(() => {
-    const normalizedQuery = searchQuery.trim().toLowerCase();
+  function showActionToast(message: string) {
+    setActionToast(message);
 
-    const nextRecords = meetingRecords.filter((meeting) => {
-      const queryMatched =
-        !normalizedQuery ||
-        meeting.title.toLowerCase().includes(normalizedQuery) ||
-        meeting.fileName.toLowerCase().includes(normalizedQuery) ||
-        meeting.id.toLowerCase().includes(normalizedQuery);
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
 
-      const statusMatched =
-        statusFilter === "all" || meeting.processingStatus === statusFilter;
+    toastTimerRef.current = setTimeout(() => {
+      setActionToast(null);
+    }, 2200);
+  }
 
-      const sourceMatched =
-        sourceFilter === "all" || meeting.inputSource === sourceFilter;
+  async function copyTextWithToast(text: string, successMessage: string) {
+    const normalizedText = text.trim();
 
-      return queryMatched && statusMatched && sourceMatched;
+    if (!normalizedText) {
+      showActionToast("Không có nội dung để copy.");
+      return;
+    }
+
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(normalizedText);
+      } else if (typeof document !== "undefined") {
+        const textArea = document.createElement("textarea");
+        textArea.value = normalizedText;
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      } else {
+        throw new Error("Clipboard API unavailable");
+      }
+
+      showActionToast(successMessage);
+    } catch {
+      showActionToast("Copy thất bại, vui lòng thử lại.");
+    }
+  }
+
+  function handleCopyTranscriptPreview() {
+    if (!previewTranscriptRecordId) {
+      return;
+    }
+
+    const content = previewTranscriptByRecord[previewTranscriptRecordId] ?? "";
+    void copyTextWithToast(content, "Đã copy transcript.");
+  }
+
+  function handleCopyReportPreview() {
+    if (!previewReportRecordId) {
+      return;
+    }
+
+    const content = previewReportByRecord[previewReportRecordId] ?? "";
+    void copyTextWithToast(content, "Đã copy biên bản.");
+  }
+
+  async function handlePreviewTranscript(record: ExternalRecord) {
+    if (previewTranscriptRecordId === record.id) {
+      setPreviewTranscriptRecordId(null);
+      return;
+    }
+
+    setPreviewTranscriptRecordId(record.id);
+
+    if (previewTranscriptByRecord[record.id]) {
+      return;
+    }
+
+    setLoadingTranscriptRecordId(record.id);
+
+    try {
+      const response = await axios.get<{ content: string }>(
+        "/api/records/transcript",
+        {
+          params: { url: record.transcribe_url },
+        },
+      );
+
+      setPreviewTranscriptByRecord((prev) => ({
+        ...prev,
+        [record.id]: response.data.content,
+      }));
+    } catch {
+      setPreviewTranscriptByRecord((prev) => ({
+        ...prev,
+        [record.id]: "Không đọc được nội dung transcript từ link hiện tại.",
+      }));
+    } finally {
+      setLoadingTranscriptRecordId(null);
+    }
+  }
+
+  function handleToggleAudioPreview(recordId: number) {
+    setPreviewAudioRecordId((prev) => (prev === recordId ? null : recordId));
+  }
+
+  function buildDownloadUrl(url: string, filename: string): string {
+    const params = new URLSearchParams({
+      url,
+      filename,
     });
 
-    return nextRecords.sort((a, b) => {
-      if (sortBy === "newest") {
-        return (
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
-      }
+    return `/api/records/download?${params.toString()}`;
+  }
 
-      if (sortBy === "oldest") {
-        return (
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
-      }
+  function resolveTranscriptFilename(filename: string): string {
+    if (filename.toLowerCase().endsWith(".wav")) {
+      return filename.replace(/\.wav$/i, ".txt");
+    }
 
-      if (sortBy === "duration_desc") {
-        return b.durationSecond - a.durationSecond;
-      }
+    const dotIndex = filename.lastIndexOf(".");
+    if (dotIndex === -1) {
+      return `${filename}.txt`;
+    }
 
-      return a.durationSecond - b.durationSecond;
-    });
-  }, [searchQuery, sortBy, sourceFilter, statusFilter]);
+    return `${filename.slice(0, dotIndex)}.txt`;
+  }
+
+  async function handlePreviewReport(record: ExternalRecord) {
+    if (!record.report) {
+      return;
+    }
+
+    if (previewReportRecordId === record.id) {
+      setPreviewReportRecordId(null);
+      return;
+    }
+
+    setPreviewReportRecordId(record.id);
+
+    if (previewReportByRecord[record.id]) {
+      return;
+    }
+
+    setLoadingReportRecordId(record.id);
+
+    try {
+      const response = await axios.get<{ content: string }>(
+        "/api/records/transcript",
+        {
+          params: { url: record.report },
+        },
+      );
+
+      setPreviewReportByRecord((prev) => ({
+        ...prev,
+        [record.id]: response.data.content,
+      }));
+    } catch {
+      setPreviewReportByRecord((prev) => ({
+        ...prev,
+        [record.id]: "Không đọc được nội dung biên bản từ link hiện tại.",
+      }));
+    } finally {
+      setLoadingReportRecordId(null);
+    }
+  }
+
+  function resolveReportFilename(filename: string): string {
+    if (filename.toLowerCase().endsWith(".wav")) {
+      return filename.replace(/\.wav$/i, "_report.txt");
+    }
+
+    const dotIndex = filename.lastIndexOf(".");
+    if (dotIndex === -1) {
+      return `${filename}_report.txt`;
+    }
+
+    return `${filename.slice(0, dotIndex)}_report.txt`;
+  }
+
+  function handleOpenSendEmailDialog(recordId: number) {
+    setSendEmailRecordId(recordId);
+    setEmailRecipientsInput("");
+    setEmailValidationError(null);
+  }
+
+  function handleCloseSendEmailDialog() {
+    setSendEmailRecordId(null);
+    setEmailRecipientsInput("");
+    setEmailValidationError(null);
+  }
+
+  async function handleSendEmail() {
+    if (!sendEmailRecordId || isSendingEmail) {
+      return;
+    }
+
+    const record = recordsQuery.data?.find((r) => r.id === sendEmailRecordId);
+    if (!record?.report) {
+      setEmailValidationError("Bản ghi này chưa có biên bản để gửi.");
+      return;
+    }
+
+    const parsed = recipientEmailsSchema.safeParse(emailRecipientsInput);
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message;
+      setEmailValidationError(message ?? "Danh sách email không hợp lệ.");
+      return;
+    }
+
+    setEmailValidationError(null);
+    setIsSendingEmail(true);
+
+    try {
+      await axios.post("/api/agent/send-email", {
+        recipients: parsed.data,
+        meetingTitle: record.filename,
+        reportUrl: record.report,
+        sessionId: process.env.NEXT_PUBLIC_AGENT_MOM_EMAIL_SESSION_ID,
+      });
+
+      handleCloseSendEmailDialog();
+      alert("Đã gửi email thành công.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Lỗi không xác định";
+      setEmailValidationError(`Gửi email thất bại: ${message}`);
+    } finally {
+      setIsSendingEmail(false);
+    }
+  }
 
   return (
-    <div className="space-y-4">
-      <section className="rounded-lg border border-border/80 bg-card p-5 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <section className="flex min-h-0 flex-1 flex-col rounded-lg border border-border/80 bg-card p-5 shadow-sm lg:sticky lg:top-4 lg:h-[calc(100dvh-8.5rem)]">
+        <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-lg font-semibold text-foreground">
               Lịch sử cuộc họp
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Theo dõi toàn bộ phiên xử lý audio và truy cập nhanh màn hình chi
-              tiết.
+              Xem lại các bản ghi đã xử lý, tải tệp và gửi biên bản qua email.
             </p>
           </div>
-          <div className="relative w-full max-w-sm">
-            <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              className="pl-9"
-              placeholder="Tìm theo tiêu đề hoặc tên file..."
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-            />
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="rounded-md border border-border/70 bg-muted/40 px-2 py-1">
+              Tổng bản ghi: {recordMetrics.total}
+            </span>
+            <span className="rounded-md border border-border/70 bg-muted/40 px-2 py-1">
+              Đã có biên bản: {recordMetrics.withReport}
+            </span>
+            <span className="rounded-md border border-border/70 bg-muted/40 px-2 py-1">
+              Chưa có biên bản: {recordMetrics.withoutReport}
+            </span>
           </div>
         </div>
 
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <label className="space-y-1 text-xs font-medium text-muted-foreground">
-            Trạng thái xử lý
-            <select
-              value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value as "all" | ProcessingStatus)
-              }
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground"
-            >
-              <option value="all">Tất cả</option>
-              <option value="completed">Hoàn tất</option>
-              <option value="processing">Đang xử lý</option>
-              <option value="uploading">Đang tải lên</option>
-              <option value="error">Lỗi</option>
-              <option value="idle">Chờ thao tác</option>
-            </select>
-          </label>
-
-          <label className="space-y-1 text-xs font-medium text-muted-foreground">
-            Nguồn vào
-            <select
-              value={sourceFilter}
-              onChange={(event) =>
-                setSourceFilter(
-                  event.target.value as "all" | MeetingRecord["inputSource"],
-                )
-              }
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground"
-            >
-              <option value="all">Tất cả</option>
-              <option value="upload">Tải tệp</option>
-              <option value="recording">Thu âm</option>
-            </select>
-          </label>
-
-          <label className="space-y-1 text-xs font-medium text-muted-foreground">
-            Sắp xếp
-            <select
-              value={sortBy}
-              onChange={(event) =>
-                setSortBy(
-                  event.target.value as
-                    | "newest"
-                    | "oldest"
-                    | "duration_desc"
-                    | "duration_asc",
-                )
-              }
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground"
-            >
-              <option value="newest">Mới nhất</option>
-              <option value="oldest">Cũ nhất</option>
-              <option value="duration_desc">Thời lượng dài nhất</option>
-              <option value="duration_asc">Thời lượng ngắn nhất</option>
-            </select>
-          </label>
-
-          <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-            <p>
-              Hiển thị <span className="font-semibold text-foreground">{filteredMeetings.length}</span> / {metrics.total} phiên
-            </p>
-            <p className="text-xs">Lọc động theo query, trạng thái, nguồn và thời lượng.</p>
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-2 sm:grid-cols-3 lg:grid-cols-4">
-          <div className="rounded-md border border-border/70 bg-background px-3 py-2 text-sm">
-            <p className="text-muted-foreground">Hoàn tất</p>
-            <p className="text-lg font-semibold text-emerald-600 dark:text-emerald-400">
-              {metrics.completed}
-            </p>
-          </div>
-          <div className="rounded-md border border-border/70 bg-background px-3 py-2 text-sm">
-            <p className="text-muted-foreground">Đang chạy</p>
-            <p className="text-lg font-semibold text-amber-600 dark:text-amber-400">
-              {metrics.processing}
-            </p>
-          </div>
-          <div className="rounded-md border border-border/70 bg-background px-3 py-2 text-sm">
-            <p className="text-muted-foreground">Lỗi xử lý</p>
-            <p className="text-lg font-semibold text-rose-600 dark:text-rose-400">
-              {metrics.error}
-            </p>
-          </div>
-          <div className="rounded-md border border-border/70 bg-background px-3 py-2 text-sm">
-            <p className="text-muted-foreground">Tổng phiên</p>
-            <p className="text-lg font-semibold text-foreground">{metrics.total}</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-3">
-        {filteredMeetings.map((meeting) => {
-          const status = resolveStatus(meeting.processingStatus);
-          const email = resolveEmailLabel(meeting);
-
-          return (
-            <article
-              key={meeting.id}
-              className="rounded-lg border border-border/80 bg-card p-4 shadow-sm"
-            >
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="space-y-1">
-                  <h2 className="text-base font-semibold text-foreground">
-                    {meeting.title}
-                  </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {meeting.fileName}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`inline-flex items-center gap-1.5 text-sm ${status.className}`}
-                  >
-                    <status.Icon
-                      className={`size-4 ${status.spin ? "animate-spin" : ""}`}
-                    />
-                    {status.label}
-                  </span>
-                  <span
-                    className={`rounded-md px-2 py-1 text-xs font-medium ${email.className}`}
-                  >
-                    {email.label}
-                  </span>
-                </div>
-              </div>
-
-              <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
-                <p>
-                  <span className="font-medium text-foreground">
-                    Thời gian:
-                  </span>{" "}
-                  {formatter.format(new Date(meeting.createdAt))}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">
-                    Nguồn vào:
-                  </span>{" "}
-                  {meeting.inputSource === "upload" ? "Tải tệp" : "Thu âm"}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">
-                    Số speaker:
-                  </span>{" "}
-                  {meeting.speakerCount}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">Mã phiên:</span>{" "}
-                  {meeting.id}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">Thời lượng:</span>{" "}
-                  {formatDuration(meeting.durationSecond)}
-                </p>
-              </div>
-
-              <div className="mt-4 flex justify-end">
-                <Link
-                  href={`/history/${meeting.id}`}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto rounded-lg">
+          {recordsQuery.isLoading ? (
+            <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+              <LoaderCircleIcon className="size-4 animate-spin" />
+              Đang tải danh sách bản ghi...
+            </div>
+          ) : recordsQuery.isError ? (
+            <div className="p-4 text-sm text-rose-600 dark:text-rose-400">
+              Không tải được danh sách bản ghi.
+            </div>
+          ) : recordsQuery.data?.length ? (
+            <div className="space-y-3 p-3">
+              {recordsQuery.data.map((record) => (
+                <div
+                  key={record.id}
+                  className={`grid gap-3 rounded-md border border-border/70 border-l-4 bg-background p-4 transition-colors hover:bg-muted/20 ${
+                    record.report
+                      ? "border-l-emerald-500/70"
+                      : "border-l-muted-foreground/30"
+                  }`}
                 >
-                  Xem chi tiết
-                  <ArrowRightIcon className="size-4" />
-                </Link>
-              </div>
-            </article>
-          );
-        })}
+                  <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h2
+                          className="max-w-full truncate text-sm font-semibold text-foreground"
+                          title={record.filename}
+                        >
+                          {record.filename}
+                        </h2>
+                        <span className="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground">
+                          ID #{record.id}
+                        </span>
+                        {!record.report ? (
+                          <span className="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground">
+                            Chưa có biên bản
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Tạo lúc {formatter.format(new Date(record.create_time))}
+                      </p>
+                    </div>
 
-        {!filteredMeetings.length ? (
-          <article className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            Không có cuộc họp phù hợp với điều kiện lọc hiện tại.
-          </article>
-        ) : null}
+                    <div className="flex shrink-0 flex-wrap items-center gap-1.5 md:flex-nowrap md:justify-end">
+                      <a
+                        href={buildDownloadUrl(
+                          record.audio_url,
+                          record.filename,
+                        )}
+                        className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+                      >
+                        <DownloadIcon className="size-3.5" />
+                        Tải âm thanh
+                      </a>
+                      <a
+                        href={buildDownloadUrl(
+                          record.transcribe_url,
+                          resolveTranscriptFilename(record.filename),
+                        )}
+                        className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+                      >
+                        <DownloadIcon className="size-3.5" />
+                        Tải transcript
+                      </a>
+                      {record.report ? (
+                        <a
+                          href={buildDownloadUrl(
+                            record.report,
+                            resolveReportFilename(record.filename),
+                          )}
+                          className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+                        >
+                          <DownloadIcon className="size-3.5" />
+                          Tải biên bản
+                        </a>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleAudioPreview(record.id)}
+                      className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border/70 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                    >
+                      <AudioLinesIcon className="size-3.5" />
+                      {previewAudioRecordId === record.id
+                        ? "Ẩn nghe thử"
+                        : "Nghe thử"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handlePreviewTranscript(record)}
+                      className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border/70 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={loadingTranscriptRecordId === record.id}
+                    >
+                      <FileTextIcon className="size-3.5" />
+                      {loadingTranscriptRecordId === record.id
+                        ? "Đang tải transcript..."
+                        : previewTranscriptRecordId === record.id
+                          ? "Ẩn transcript"
+                          : "Xem transcript"}
+                    </button>
+
+                    {record.report ? (
+                      <button
+                        type="button"
+                        onClick={() => handlePreviewReport(record)}
+                        className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border/70 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={loadingReportRecordId === record.id}
+                      >
+                        <FileTextIcon className="size-3.5" />
+                        {loadingReportRecordId === record.id
+                          ? "Đang tải biên bản..."
+                          : previewReportRecordId === record.id
+                            ? "Ẩn biên bản"
+                            : "Xem biên bản"}
+                      </button>
+                    ) : (
+                      <></>
+                    )}
+
+                    {record.report ? (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSendEmailDialog(record.id)}
+                        className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border/70 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                      >
+                        <MailIcon className="size-3.5" />
+                        Gửi email
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {previewAudioRecordId === record.id ? (
+                    <div className="rounded-md border border-border/70 p-3">
+                      <p className="mb-2 text-xs font-medium text-muted-foreground">
+                        Nghe thử tệp âm thanh
+                      </p>
+                      <audio
+                        controls
+                        preload="none"
+                        src={record.audio_url}
+                        className="w-full"
+                      >
+                        Trình duyệt không hỗ trợ phát audio.
+                      </audio>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-4 text-sm text-muted-foreground">
+              Chưa có bản ghi nào.
+            </div>
+          )}
+        </div>
       </section>
+
+      <Dialog
+        open={previewTranscriptRecordId !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPreviewTranscriptRecordId(null);
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          className="mb-2 flex h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[calc(100vw-1rem)] flex-col justify-between gap-0 overflow-hidden rounded-xl p-0 sm:mb-4 sm:h-[calc(100dvh-2rem)] sm:w-[calc(100vw-2rem)] sm:max-w-[calc(100vw-2rem)] sm:max-w-none"
+        >
+          <DialogHeader className="space-y-0 text-left">
+            <DialogTitle className="px-4 pt-4 text-base sm:px-6 sm:pt-6">
+              Xem nhanh transcript
+            </DialogTitle>
+            <DialogDescription className="px-4 pb-3 text-xs sm:px-6">
+              {activeTranscriptRecord?.filename ??
+                (previewTranscriptRecordId
+                  ? `Bản ghi #${previewTranscriptRecordId}`
+                  : "")}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 sm:px-6 sm:pb-6">
+            {previewTranscriptRecordId &&
+            loadingTranscriptRecordId === previewTranscriptRecordId ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <LoaderCircleIcon className="size-4 animate-spin" />
+                Đang tải nội dung transcript...
+              </div>
+            ) : (
+              <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-muted-foreground">
+                {(previewTranscriptRecordId
+                  ? previewTranscriptByRecord[previewTranscriptRecordId]
+                  : undefined) ?? "Chưa có nội dung transcript."}
+              </pre>
+            )}
+          </div>
+
+          <DialogFooter className="mx-0 mb-0 rounded-none border-t px-4 pb-4 pt-4 sm:px-6 sm:pb-6 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              onClick={handleCopyTranscriptPreview}
+              disabled={
+                !previewTranscriptRecordId ||
+                loadingTranscriptRecordId === previewTranscriptRecordId
+              }
+            >
+              <CopyIcon className="size-4" />
+              Copy transcript
+            </Button>
+            <DialogClose asChild>
+              <Button type="button" variant="outline">
+                Đóng
+              </Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={previewReportRecordId !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPreviewReportRecordId(null);
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          className="mb-2 flex h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[calc(100vw-1rem)] flex-col justify-between gap-0 overflow-hidden rounded-xl p-0 sm:mb-4 sm:h-[calc(100dvh-2rem)] sm:w-[calc(100vw-2rem)] sm:max-w-[calc(100vw-2rem)] sm:max-w-none"
+        >
+          <DialogHeader className="space-y-0 text-left">
+            <DialogTitle className="px-4 pt-4 text-base sm:px-6 sm:pt-6">
+              Xem nhanh biên bản
+            </DialogTitle>
+            <DialogDescription className="px-4 pb-3 text-xs sm:px-6">
+              {activeReportRecord?.filename ??
+                (previewReportRecordId
+                  ? `Bản ghi #${previewReportRecordId}`
+                  : "")}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 sm:px-6 sm:pb-6">
+            {previewReportRecordId &&
+            loadingReportRecordId === previewReportRecordId ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <LoaderCircleIcon className="size-4 animate-spin" />
+                Đang tải nội dung biên bản...
+              </div>
+            ) : (
+              <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-muted-foreground">
+                {(previewReportRecordId
+                  ? previewReportByRecord[previewReportRecordId]
+                  : undefined) ?? "Chưa có nội dung biên bản."}
+              </pre>
+            )}
+          </div>
+
+          <DialogFooter className="mx-0 mb-0 rounded-none border-t px-4 pb-4 pt-4 sm:px-6 sm:pb-6 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              onClick={handleCopyReportPreview}
+              disabled={
+                !previewReportRecordId ||
+                loadingReportRecordId === previewReportRecordId
+              }
+            >
+              <CopyIcon className="size-4" />
+              Copy biên bản
+            </Button>
+            <DialogClose asChild>
+              <Button type="button" variant="outline">
+                Đóng
+              </Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={sendEmailRecordId !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            handleCloseSendEmailDialog();
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Gửi email biên bản</DialogTitle>
+            <DialogDescription>
+              Bạn đang gửi biên bản của tệp: {selectedSendEmailRecord?.filename}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedSendEmailRecord?.report ? (
+            <div className="min-w-0 space-y-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                URL file biên bản
+              </p>
+              <a
+                href={selectedSendEmailRecord.report}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-muted-foreground transition-colors hover:text-primary hover:underline hover:underline-offset-2"
+                title={selectedSendEmailRecord.report}
+              >
+                {selectedSendEmailRecord.report}
+              </a>
+            </div>
+          ) : null}
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <label
+                htmlFor="email-input"
+                className="text-sm font-medium text-foreground"
+              >
+                Danh sách email người nhận (mỗi email một dòng hoặc cách nhau
+                bằng dấu phẩy)
+              </label>
+              <textarea
+                id="email-input"
+                value={emailRecipientsInput}
+                onChange={(e) => {
+                  setEmailRecipientsInput(e.target.value);
+                  if (emailValidationError) {
+                    setEmailValidationError(null);
+                  }
+                }}
+                rows={4}
+                placeholder={"nguoi-nhan-1@congty.vn\nnguoi-nhan-2@congty.vn"}
+                className="w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              />
+              {emailValidationError ? (
+                <p className="text-xs text-rose-600 dark:text-rose-400">
+                  {emailValidationError}
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="outline" disabled={isSendingEmail}>
+                Hủy
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              onClick={handleSendEmail}
+              disabled={isSendingEmail}
+              className="gap-1.5"
+            >
+              {isSendingEmail ? (
+                <LoaderCircleIcon className="size-4 animate-spin" />
+              ) : null}
+              Gửi email
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {actionToast ? (
+        <div className="pointer-events-none fixed right-4 bottom-4 z-50 rounded-lg border border-border/70 bg-background/95 px-3 py-2 text-xs font-medium text-foreground shadow-lg backdrop-blur">
+          {actionToast}
+        </div>
+      ) : null}
     </div>
   );
 }
