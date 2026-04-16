@@ -364,11 +364,12 @@ export default function HistoryPage() {
       });
 
       handleCloseSendEmailDialog();
-      alert("Đã gửi email thành công.");
+      showActionToast("Đã gửi email thành công.");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Lỗi không xác định";
       setEmailValidationError(`Gửi email thất bại: ${message}`);
+      showActionToast(`Gửi email thất bại: ${message}`);
     } finally {
       setIsSendingEmail(false);
     }
