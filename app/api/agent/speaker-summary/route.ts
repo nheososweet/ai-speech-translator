@@ -11,6 +11,8 @@ const AGENT_SPEAKER_SUMMARY_API_URL = resolveAgentExternalApiUrl();
 const AGENT_SPEAKER_SUMMARY_API_KEY =
   process.env.AGENT_SPEAKER_SUMMARY_API_KEY;
 
+export const maxDuration = 1200;
+
 function normalizeSpeakerSummaries(payload: unknown): SpeakerSummary[] {
   const parseArray = (value: unknown): SpeakerSummary[] => {
     if (!Array.isArray(value)) {
@@ -82,6 +84,8 @@ function normalizeSpeakerSummaries(payload: unknown): SpeakerSummary[] {
 }
 
 export async function POST(request: Request) {
+  const startedAt = Date.now();
+
   try {
     if (!AGENT_SPEAKER_SUMMARY_API_KEY) {
       return NextResponse.json(
@@ -121,6 +125,8 @@ export async function POST(request: Request) {
       transcriptMessage,
     ].join("\n\n");
 
+    console.log("Speaker summary prompt", { sessionId, promptMessage });
+
     const response = await axios.post(
       AGENT_SPEAKER_SUMMARY_API_URL,
       {
@@ -132,11 +138,24 @@ export async function POST(request: Request) {
           Authorization: `Bearer ${AGENT_SPEAKER_SUMMARY_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 60_000,
+        timeout: 1_200_000,
       },
     );
 
-    const agentText = extractAgentResponseText(response.data);
+    const upstream = response.data;
+
+    console.log("Speaker summary upstream response meta", {
+
+      status: response.status,
+      elapsedMs: Date.now() - startedAt,
+      payloadType: typeof upstream,
+      payloadSize:
+        typeof upstream === "string"
+          ? upstream.length
+          : JSON.stringify(upstream ?? {}).length,
+    });
+
+    const agentText = extractAgentResponseText(upstream);
     const speakerSummaries = normalizeSpeakerSummaries(agentText);
 
     if (!speakerSummaries.length) {
@@ -144,21 +163,33 @@ export async function POST(request: Request) {
         {
           error:
             "Agent trả về dữ liệu rỗng hoặc sai schema cho tóm tắt theo người nói.",
-          raw: response.data,
+          raw: upstream,
+          upstream,
+          upstreamStatus: response.status,
         },
         { status: 502 },
       );
     }
 
-    return NextResponse.json({ speakerSummaries });
+    return NextResponse.json({
+      speakerSummaries,
+      upstream,
+      upstreamStatus: response.status,
+    });
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      const upstreamStatus = error.response?.status ?? 502;
+      const upstream = error.response?.data ?? error.message;
+
       return NextResponse.json(
         {
           error: "Không gọi được external agent API cho speaker summary.",
-          detail: error.response?.data ?? error.message,
+          detail: upstream,
+          upstream,
+          upstreamStatus,
+          elapsedMs: Date.now() - startedAt,
         },
-        { status: 502 },
+        { status: upstreamStatus },
       );
     }
 

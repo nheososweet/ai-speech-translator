@@ -1,6 +1,8 @@
 import axios from "axios";
 import { NextResponse } from "next/server";
 
+export const maxDuration = 1200;
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const transcriptUrl = url.searchParams.get("url");
@@ -23,18 +25,29 @@ export async function GET(request: Request) {
 
     const response = await axios.get<string>(transcriptUrl, {
       responseType: "text",
-      timeout: 60_000,
+      timeout: 1_200_000,
     });
 
-    return NextResponse.json({ content: response.data ?? "" });
+    const upstream = response.data ?? "";
+
+    return NextResponse.json({
+      content: upstream,
+      upstream,
+      upstreamStatus: response.status,
+    });
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      const upstreamStatus = error.response?.status ?? 502;
+      const upstream = error.response?.data ?? error.message;
+
       return NextResponse.json(
         {
           error: "Không thể đọc transcript từ nguồn.",
-          detail: error.response?.data ?? error.message,
+          detail: upstream,
+          upstream,
+          upstreamStatus,
         },
-        { status: 502 },
+        { status: upstreamStatus },
       );
     }
 

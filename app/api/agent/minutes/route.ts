@@ -6,6 +6,8 @@ import { extractAgentResponseText, resolveAgentExternalApiUrl } from "@/lib/agen
 const AGENT_API_URL = resolveAgentExternalApiUrl();
 const AGENT_API_KEY = process.env.AGENT_MINUTES_API_KEY;
 
+export const maxDuration = 1200;
+
 export async function POST(request: Request) {
   try {
     if (!AGENT_API_KEY) {
@@ -44,31 +46,44 @@ export async function POST(request: Request) {
           Authorization: `Bearer ${AGENT_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 60_000,
+        timeout: 1_200_000,
       },
     );
 
-    const minutesMarkdown = extractAgentResponseText(response.data);
+    const upstream = response.data;
+
+    const minutesMarkdown = extractAgentResponseText(upstream);
     if (!minutesMarkdown) {
       return NextResponse.json(
         {
           error:
             "Agent trả về dữ liệu rỗng hoặc định dạng chưa hỗ trợ. Kiểm tra response schema thực tế.",
-          raw: response.data,
+          raw: upstream,
+          upstream,
+          upstreamStatus: response.status,
         },
         { status: 502 },
       );
     }
 
-    return NextResponse.json({ minutesMarkdown });
+    return NextResponse.json({
+      minutesMarkdown,
+      upstream,
+      upstreamStatus: response.status,
+    });
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      const upstreamStatus = error.response?.status ?? 502;
+      const upstream = error.response?.data ?? error.message;
+
       return NextResponse.json(
         {
           error: "Không gọi được external agent API.",
-          detail: error.response?.data ?? error.message,
+          detail: upstream,
+          upstream,
+          upstreamStatus,
         },
-        { status: 502 },
+        { status: upstreamStatus },
       );
     }
 

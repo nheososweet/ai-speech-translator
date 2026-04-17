@@ -9,6 +9,8 @@ import {
 const AGENT_EMAIL_API_URL = resolveAgentExternalApiUrl();
 const AGENT_EMAIL_API_KEY = process.env.AGENT_MOM_EMAIL_API_KEY;
 
+export const maxDuration = 1200;
+
 export async function POST(request: Request) {
   try {
     if (!AGENT_EMAIL_API_KEY) {
@@ -49,10 +51,9 @@ export async function POST(request: Request) {
       "Bạn là agent gửi email tự động.",
       "Hãy thực hiện gửi email theo nghiệp vụ đã được cấu hình nội bộ của bạn.",
       `Người nhận (cách nhau dấu phẩy): ${recipients.join(", ")}`,
-      `Tiêu đề cuộc họp: ${body.meetingTitle?.trim() || "Không có tiêu đề"}`,
       `Biên bản: ${(body.minutes ?? "").trim() || "Chưa có biên bản"}`,
       `URL file biên bản: ${body.reportUrl?.trim() || "Chưa có link file"}`,
-      `Transcript: ${(body.rawTranscript ?? "").trim() || "Chưa có transcript"}`,
+      "Hãy tự trích xuất tiêu đề cuộc họp từ chính nội dung biên bản ở trên, không dùng tiêu đề được truyền sẵn.",
       "Sau khi xử lý, phản hồi ngắn gọn trạng thái gửi mail.",
     ].join("\n\n");
 
@@ -67,30 +68,43 @@ export async function POST(request: Request) {
           Authorization: `Bearer ${AGENT_EMAIL_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 60_000,
+        timeout: 1_200_000,
       },
     );
 
-    const resultText = extractAgentResponseText(response.data);
+    const upstream = response.data;
+
+    const resultText = extractAgentResponseText(upstream);
     if (!resultText) {
       return NextResponse.json(
         {
           error: "Agent gửi mail trả về dữ liệu rỗng.",
-          raw: response.data,
+          raw: upstream,
+          upstream,
+          upstreamStatus: response.status,
         },
         { status: 502 },
       );
     }
 
-    return NextResponse.json({ resultText });
+    return NextResponse.json({
+      resultText,
+      upstream,
+      upstreamStatus: response.status,
+    });
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      const upstreamStatus = error.response?.status ?? 502;
+      const upstream = error.response?.data ?? error.message;
+
       return NextResponse.json(
         {
           error: "Không gọi được external agent API cho gửi mail.",
-          detail: error.response?.data ?? error.message,
+          detail: upstream,
+          upstream,
+          upstreamStatus,
         },
-        { status: 502 },
+        { status: upstreamStatus },
       );
     }
 

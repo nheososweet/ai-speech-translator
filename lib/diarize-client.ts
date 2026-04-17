@@ -2,7 +2,7 @@ import axios from "axios";
 
 const appApiClient = axios.create({
   baseURL: "/api",
-  timeout: 120_000,
+  timeout: 1_200_000,
 });
 
 export interface DiarizeTranscribeApiResponse {
