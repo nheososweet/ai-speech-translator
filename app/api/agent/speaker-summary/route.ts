@@ -1,4 +1,5 @@
 import axios from "axios";
+import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 
 import {
@@ -10,8 +11,50 @@ import type { SpeakerSummary } from "@/lib/types/meeting";
 const AGENT_SPEAKER_SUMMARY_API_URL = resolveAgentExternalApiUrl();
 const AGENT_SPEAKER_SUMMARY_API_KEY =
   process.env.AGENT_SPEAKER_SUMMARY_API_KEY;
+const AGENT_STREAM_TIMEOUT_MS = 1_200_000;
+const SSE_DONE_MARKER = /data:\s*\[DONE\]/i;
 
 export const maxDuration = 1200;
+
+async function readUpstreamStreamToText(
+  stream: Readable,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let fullText = "";
+
+    const finalize = (value: string) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve(value);
+    };
+
+    stream.on("data", (chunk: unknown) => {
+      const chunkText = Buffer.isBuffer(chunk)
+        ? chunk.toString("utf8")
+        : String(chunk ?? "");
+
+      fullText += chunkText;
+
+      // Some SSE servers keep the connection open after [DONE].
+      if (SSE_DONE_MARKER.test(fullText)) {
+        stream.destroy();
+        finalize(fullText);
+      }
+    });
+
+    stream.on("end", () => finalize(fullText));
+    stream.on("close", () => finalize(fullText));
+    stream.on("error", (error) => {
+      if (!settled) {
+        reject(error);
+      }
+    });
+  });
+}
 
 function normalizeSpeakerSummaries(payload: unknown): SpeakerSummary[] {
   const parseArray = (value: unknown): SpeakerSummary[] => {
@@ -82,7 +125,6 @@ function normalizeSpeakerSummaries(payload: unknown): SpeakerSummary[] {
     }
   }
 }
-
 export async function POST(request: Request) {
   const startedAt = Date.now();
 
@@ -114,7 +156,9 @@ export async function POST(request: Request) {
 
     const sessionId =
       body.sessionId?.trim() || "my-speaker-summary-session-001";
+
     const transcriptMessage = transcriptLines.join("\n");
+
     const promptMessage = [
       "Bạn là trợ lý tóm tắt hội thoại.",
       "Nhiệm vụ: tóm tắt ý chính theo từng người nói từ transcript bên dưới.",
@@ -125,9 +169,7 @@ export async function POST(request: Request) {
       transcriptMessage,
     ].join("\n\n");
 
-    console.log("Speaker summary prompt", { sessionId, promptMessage });
-
-    const response = await axios.post(
+    const response = await axios.post<Readable>(
       AGENT_SPEAKER_SUMMARY_API_URL,
       {
         session_id: sessionId,
@@ -137,35 +179,43 @@ export async function POST(request: Request) {
         headers: {
           Authorization: `Bearer ${AGENT_SPEAKER_SUMMARY_API_KEY}`,
           "Content-Type": "application/json",
+          Accept: "text/event-stream, application/json",
         },
-        timeout: 1_200_000,
+        responseType: "stream",
+        timeout: AGENT_STREAM_TIMEOUT_MS,
+        validateStatus: () => true,
       },
     );
 
-    const upstream = response.data;
+    const fullText = await readUpstreamStreamToText(response.data);
 
-    console.log("Speaker summary upstream response meta", {
+    if (response.status >= 400) {
+      return NextResponse.json(
+        {
+          error: "External API error",
+          detail: fullText,
+          status: response.status,
+          upstream: fullText,
+          upstreamStatus: response.status,
+        },
+        { status: response.status },
+      );
+    }
 
-      status: response.status,
+    console.log("DONE EXTERNAL API", {
       elapsedMs: Date.now() - startedAt,
-      payloadType: typeof upstream,
-      payloadSize:
-        typeof upstream === "string"
-          ? upstream.length
-          : JSON.stringify(upstream ?? {}).length,
+      size: fullText.length,
     });
 
-    const agentText = extractAgentResponseText(upstream);
+    // 👉 extract & normalize như cũ
+    const agentText = extractAgentResponseText(fullText);
     const speakerSummaries = normalizeSpeakerSummaries(agentText);
 
     if (!speakerSummaries.length) {
       return NextResponse.json(
         {
-          error:
-            "Agent trả về dữ liệu rỗng hoặc sai schema cho tóm tắt theo người nói.",
-          raw: upstream,
-          upstream,
-          upstreamStatus: response.status,
+          error: "Agent trả về dữ liệu rỗng hoặc sai schema.",
+          raw: fullText,
         },
         { status: 502 },
       );
@@ -173,28 +223,32 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       speakerSummaries,
-      upstream,
-      upstreamStatus: response.status,
     });
+
   } catch (error) {
     if (axios.isAxiosError(error)) {
       const upstreamStatus = error.response?.status ?? 502;
-      const upstream = error.response?.data ?? error.message;
+      const upstream =
+        typeof error.response?.data === "string"
+          ? error.response.data
+          : error.message;
 
       return NextResponse.json(
         {
-          error: "Không gọi được external agent API cho speaker summary.",
+          error: "Lỗi khi gọi external agent API",
           detail: upstream,
           upstream,
           upstreamStatus,
-          elapsedMs: Date.now() - startedAt,
         },
         { status: upstreamStatus },
       );
     }
 
     return NextResponse.json(
-      { error: "Lỗi không xác định khi tạo tóm tắt theo người nói." },
+      {
+        error: "Lỗi khi gọi external agent API",
+        detail: error instanceof Error ? error.message : String(error),
+      },
       { status: 500 },
     );
   }
