@@ -1,7 +1,5 @@
 import axios from "axios";
 
-import type { SpeakerSummary } from "@/lib/types/meeting";
-
 const appApiClient = axios.create({
   baseURL: "/api",
   timeout: 60_000,
@@ -9,40 +7,6 @@ const appApiClient = axios.create({
     "Content-Type": "application/json",
   },
 });
-
-export async function generateMinutesFromTranscript(input: {
-  rawTranscript: string;
-  sessionId?: string;
-}): Promise<string> {
-  const response = await appApiClient.post("/agent/minutes", {
-    rawTranscript: input.rawTranscript,
-    sessionId: input.sessionId,
-  });
-
-  const minutesMarkdown = response.data?.minutesMarkdown;
-  if (typeof minutesMarkdown !== "string" || !minutesMarkdown.trim()) {
-    throw new Error("Không lấy được biên bản từ proxy API.");
-  }
-
-  return minutesMarkdown.trim();
-}
-
-export async function generateSpeakerSummariesFromTranscriptLines(input: {
-  transcriptLines: string[];
-  sessionId?: string;
-}): Promise<SpeakerSummary[]> {
-  const response = await appApiClient.post("/agent/speaker-summary", {
-    transcriptLines: input.transcriptLines,
-    sessionId: input.sessionId,
-  });
-
-  const speakerSummaries = response.data?.speakerSummaries;
-  if (!Array.isArray(speakerSummaries) || speakerSummaries.length === 0) {
-    throw new Error("Không lấy được tóm tắt theo người nói từ proxy API.");
-  }
-
-  return speakerSummaries as SpeakerSummary[];
-}
 
 export async function sendMeetingEmailViaAgent(input: {
   recipients: string[];

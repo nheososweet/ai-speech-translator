@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import { Providers } from "./providers";
+import "@cyntler/react-doc-viewer/dist/index.css";
 import "./globals.css";
 
 const quicksand = localFont({
@@ -79,7 +80,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="vi" className={`${quicksand.variable} h-full antialiased`}>
+    <html
+      suppressHydrationWarning
+      lang="vi"
+      className={`${quicksand.variable} h-full antialiased`}
+    >
       <body className="min-h-full flex flex-col">
         <Providers>{children}</Providers>
       </body>

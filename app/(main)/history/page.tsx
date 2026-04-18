@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import axios from "axios";
 import {
   AudioLinesIcon,
@@ -22,15 +22,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-
-type ExternalRecord = {
-  id: number;
-  create_time: string;
-  audio_url: string;
-  transcribe_url: string;
-  report: string | null;
-  filename: string;
-};
+import { useRecordsQuery } from "@/hooks/services/use-records-query";
+import type { PipelineRecord } from "@/services/pipeline-records.service";
 
 const formatter = new Intl.DateTimeFormat("vi-VN", {
   dateStyle: "medium",
@@ -53,6 +46,45 @@ const recipientEmailsSchema = z
       .min(1, "Vui lòng nhập ít nhất 1 email người nhận."),
   );
 
+const ReportDocViewer = dynamic(
+  async () => {
+    const mod = await import("@cyntler/react-doc-viewer");
+
+    return function ReportDocViewerInner(props: {
+      url: string;
+      fileName: string;
+    }) {
+      return (
+        <mod.default
+          documents={[
+            {
+              uri: props.url,
+              fileName: props.fileName,
+            },
+          ]}
+          pluginRenderers={mod.DocViewerRenderers}
+          style={{ height: "100%" }}
+          config={{
+            header: {
+              disableHeader: true,
+              disableFileName: true,
+            },
+          }}
+        />
+      );
+    };
+  },
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <LoaderCircleIcon className="size-4 animate-spin" />
+        Đang tải trình xem tài liệu...
+      </div>
+    ),
+  },
+);
+
 export default function HistoryPage() {
   const [previewTranscriptByRecord, setPreviewTranscriptByRecord] = useState<
     Record<number, string>
@@ -64,12 +96,6 @@ export default function HistoryPage() {
     number | null
   >(null);
   const [previewTranscriptRecordId, setPreviewTranscriptRecordId] = useState<
-    number | null
-  >(null);
-  const [previewReportByRecord, setPreviewReportByRecord] = useState<
-    Record<number, string>
-  >({});
-  const [loadingReportRecordId, setLoadingReportRecordId] = useState<
     number | null
   >(null);
   const [previewReportRecordId, setPreviewReportRecordId] = useState<
@@ -86,23 +112,15 @@ export default function HistoryPage() {
   const [actionToast, setActionToast] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const recordsQuery = useQuery({
-    queryKey: ["records"],
-    queryFn: async () => {
-      const response = await axios.get<{ records: ExternalRecord[] }>(
-        "/api/records",
-      );
-      return response.data.records;
-    },
-  });
+  const recordsQuery = useRecordsQuery();
 
   const recordMetrics = useMemo(() => {
     const records = recordsQuery.data ?? [];
 
     return {
       total: records.length,
-      withReport: records.filter((record) => Boolean(record.report)).length,
-      withoutReport: records.filter((record) => !record.report).length,
+      withReport: records.filter((record) => Boolean(record.reportUrl)).length,
+      withoutReport: records.filter((record) => !record.reportUrl).length,
     };
   }, [recordsQuery.data]);
 
@@ -198,16 +216,7 @@ export default function HistoryPage() {
     void copyTextWithToast(content, "Đã copy transcript.");
   }
 
-  function handleCopyReportPreview() {
-    if (!previewReportRecordId) {
-      return;
-    }
-
-    const content = previewReportByRecord[previewReportRecordId] ?? "";
-    void copyTextWithToast(content, "Đã copy biên bản.");
-  }
-
-  async function handlePreviewTranscript(record: ExternalRecord) {
+  async function handlePreviewTranscript(record: PipelineRecord) {
     if (previewTranscriptRecordId === record.id) {
       setPreviewTranscriptRecordId(null);
       return;
@@ -222,16 +231,14 @@ export default function HistoryPage() {
     setLoadingTranscriptRecordId(record.id);
 
     try {
-      const response = await axios.get<{ content: string }>(
-        "/api/records/transcript",
-        {
-          params: { url: record.transcribe_url },
-        },
-      );
+      const response = await axios.get<string>(record.transcribeUrl, {
+        responseType: "text",
+        timeout: 60_000,
+      });
 
       setPreviewTranscriptByRecord((prev) => ({
         ...prev,
-        [record.id]: response.data.content,
+        [record.id]: response.data ?? "",
       }));
     } catch {
       setPreviewTranscriptByRecord((prev) => ({
@@ -247,13 +254,8 @@ export default function HistoryPage() {
     setPreviewAudioRecordId((prev) => (prev === recordId ? null : recordId));
   }
 
-  function buildDownloadUrl(url: string, filename: string): string {
-    const params = new URLSearchParams({
-      url,
-      filename,
-    });
-
-    return `/api/records/download?${params.toString()}`;
+  function buildDownloadUrl(url: string): string {
+    return url;
   }
 
   function resolveTranscriptFilename(filename: string): string {
@@ -269,8 +271,8 @@ export default function HistoryPage() {
     return `${filename.slice(0, dotIndex)}.txt`;
   }
 
-  async function handlePreviewReport(record: ExternalRecord) {
-    if (!record.report) {
+  function handlePreviewReport(record: PipelineRecord) {
+    if (!record.reportUrl) {
       return;
     }
 
@@ -280,46 +282,32 @@ export default function HistoryPage() {
     }
 
     setPreviewReportRecordId(record.id);
-
-    if (previewReportByRecord[record.id]) {
-      return;
-    }
-
-    setLoadingReportRecordId(record.id);
-
-    try {
-      const response = await axios.get<{ content: string }>(
-        "/api/records/transcript",
-        {
-          params: { url: record.report },
-        },
-      );
-
-      setPreviewReportByRecord((prev) => ({
-        ...prev,
-        [record.id]: response.data.content,
-      }));
-    } catch {
-      setPreviewReportByRecord((prev) => ({
-        ...prev,
-        [record.id]: "Không đọc được nội dung biên bản từ link hiện tại.",
-      }));
-    } finally {
-      setLoadingReportRecordId(null);
-    }
   }
 
-  function resolveReportFilename(filename: string): string {
+  function resolveReportFilename(filename: string, reportUrl: string): string {
+    const extension = (() => {
+      try {
+        const extracted = new URL(reportUrl).pathname
+          .split(".")
+          .pop()
+          ?.toLowerCase();
+
+        return extracted ? `.${extracted}` : ".docx";
+      } catch {
+        return ".docx";
+      }
+    })();
+
     if (filename.toLowerCase().endsWith(".wav")) {
-      return filename.replace(/\.wav$/i, "_report.txt");
+      return filename.replace(/\.wav$/i, `_report${extension}`);
     }
 
     const dotIndex = filename.lastIndexOf(".");
     if (dotIndex === -1) {
-      return `${filename}_report.txt`;
+      return `${filename}_report${extension}`;
     }
 
-    return `${filename.slice(0, dotIndex)}_report.txt`;
+    return `${filename.slice(0, dotIndex)}_report${extension}`;
   }
 
   function handleOpenSendEmailDialog(recordId: number) {
@@ -340,7 +328,7 @@ export default function HistoryPage() {
     }
 
     const record = recordsQuery.data?.find((r) => r.id === sendEmailRecordId);
-    if (!record?.report) {
+    if (!record?.reportUrl) {
       setEmailValidationError("Bản ghi này chưa có biên bản để gửi.");
       return;
     }
@@ -359,7 +347,7 @@ export default function HistoryPage() {
       await axios.post("/api/agent/send-email", {
         recipients: parsed.data,
         meetingTitle: record.filename,
-        reportUrl: record.report,
+        reportUrl: record.reportUrl,
         sessionId: process.env.NEXT_PUBLIC_AGENT_MOM_EMAIL_SESSION_ID,
       });
 
@@ -416,7 +404,7 @@ export default function HistoryPage() {
                 <div
                   key={record.id}
                   className={`grid gap-3 rounded-md border border-border/70 border-l-4 bg-background p-4 transition-colors hover:bg-muted/20 ${
-                    record.report
+                    record.reportUrl
                       ? "border-l-emerald-500/70"
                       : "border-l-muted-foreground/30"
                   }`}
@@ -433,43 +421,40 @@ export default function HistoryPage() {
                         <span className="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground">
                           ID #{record.id}
                         </span>
-                        {!record.report ? (
+                        {!record.reportUrl ? (
                           <span className="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground">
                             Chưa có biên bản
                           </span>
                         ) : null}
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Tạo lúc {formatter.format(new Date(record.create_time))}
+                        Tạo lúc {formatter.format(new Date(record.createTime))}
                       </p>
                     </div>
 
                     <div className="flex shrink-0 flex-wrap items-center gap-1.5 md:flex-nowrap md:justify-end">
                       <a
-                        href={buildDownloadUrl(
-                          record.audio_url,
-                          record.filename,
-                        )}
+                        href={buildDownloadUrl(record.audioUrl)}
+                        download={record.filename}
                         className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
                       >
                         <DownloadIcon className="size-3.5" />
                         Tải âm thanh
                       </a>
                       <a
-                        href={buildDownloadUrl(
-                          record.transcribe_url,
-                          resolveTranscriptFilename(record.filename),
-                        )}
+                        href={buildDownloadUrl(record.transcribeUrl)}
+                        download={resolveTranscriptFilename(record.filename)}
                         className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
                       >
                         <DownloadIcon className="size-3.5" />
                         Tải transcript
                       </a>
-                      {record.report ? (
+                      {record.reportUrl ? (
                         <a
-                          href={buildDownloadUrl(
-                            record.report,
-                            resolveReportFilename(record.filename),
+                          href={buildDownloadUrl(record.reportUrl)}
+                          download={resolveReportFilename(
+                            record.filename,
+                            record.reportUrl,
                           )}
                           className="inline-flex items-center gap-1 rounded-full border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
                         >
@@ -506,25 +491,22 @@ export default function HistoryPage() {
                           : "Xem transcript"}
                     </button>
 
-                    {record.report ? (
+                    {record.reportUrl ? (
                       <button
                         type="button"
                         onClick={() => handlePreviewReport(record)}
                         className="inline-flex min-h-8 items-center gap-1 rounded-full border border-border/70 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
-                        disabled={loadingReportRecordId === record.id}
                       >
                         <FileTextIcon className="size-3.5" />
-                        {loadingReportRecordId === record.id
-                          ? "Đang tải biên bản..."
-                          : previewReportRecordId === record.id
-                            ? "Ẩn biên bản"
-                            : "Xem biên bản"}
+                        {previewReportRecordId === record.id
+                          ? "Ẩn biên bản"
+                          : "Xem biên bản"}
                       </button>
                     ) : (
                       <></>
                     )}
 
-                    {record.report ? (
+                    {record.reportUrl ? (
                       <button
                         type="button"
                         onClick={() => handleOpenSendEmailDialog(record.id)}
@@ -544,7 +526,7 @@ export default function HistoryPage() {
                       <audio
                         controls
                         preload="none"
-                        src={record.audio_url}
+                        src={record.audioUrl}
                         className="w-full"
                       >
                         Trình duyệt không hỗ trợ phát audio.
@@ -650,35 +632,40 @@ export default function HistoryPage() {
           </DialogHeader>
 
           <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 sm:px-6 sm:pb-6">
-            {previewReportRecordId &&
-            loadingReportRecordId === previewReportRecordId ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <LoaderCircleIcon className="size-4 animate-spin" />
-                Đang tải nội dung biên bản...
+            {activeReportRecord?.reportUrl ? (
+              <div className="h-full min-h-[58dvh] overflow-hidden rounded-md border border-border/70 bg-background">
+                <ReportDocViewer
+                  url={activeReportRecord.reportUrl}
+                  fileName={resolveReportFilename(
+                    activeReportRecord.filename,
+                    activeReportRecord.reportUrl,
+                  )}
+                />
               </div>
             ) : (
-              <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-muted-foreground">
-                {(previewReportRecordId
-                  ? previewReportByRecord[previewReportRecordId]
-                  : undefined) ?? "Chưa có nội dung biên bản."}
-              </pre>
+              <div className="text-sm text-muted-foreground">
+                Chưa có nội dung biên bản.
+              </div>
             )}
           </div>
 
           <DialogFooter className="mx-0 mb-0 rounded-none border-t px-4 pb-4 pt-4 sm:px-6 sm:pb-6 sm:justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              className="gap-1.5"
-              onClick={handleCopyReportPreview}
-              disabled={
-                !previewReportRecordId ||
-                loadingReportRecordId === previewReportRecordId
-              }
-            >
-              <CopyIcon className="size-4" />
-              Copy biên bản
-            </Button>
+            {activeReportRecord?.reportUrl ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-1.5"
+                asChild
+              >
+                <a
+                  href={activeReportRecord.reportUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Mở tab mới
+                </a>
+              </Button>
+            ) : null}
             <DialogClose asChild>
               <Button type="button" variant="outline">
                 Đóng
@@ -703,19 +690,19 @@ export default function HistoryPage() {
               Bạn đang gửi biên bản của tệp: {selectedSendEmailRecord?.filename}
             </DialogDescription>
           </DialogHeader>
-          {selectedSendEmailRecord?.report ? (
+          {selectedSendEmailRecord?.reportUrl ? (
             <div className="min-w-0 space-y-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
               <p className="text-xs font-medium text-muted-foreground">
                 URL file biên bản
               </p>
               <a
-                href={selectedSendEmailRecord.report}
+                href={selectedSendEmailRecord.reportUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-muted-foreground transition-colors hover:text-primary hover:underline hover:underline-offset-2"
-                title={selectedSendEmailRecord.report}
+                title={selectedSendEmailRecord.reportUrl}
               >
-                {selectedSendEmailRecord.report}
+                {selectedSendEmailRecord.reportUrl}
               </a>
             </div>
           ) : null}

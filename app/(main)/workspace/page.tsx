@@ -32,12 +32,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { RecordingPanel } from "@/components/workspace/recording-panel";
 import { UploadPanel } from "@/components/workspace/upload-panel";
-import {
-  generateMinutesFromTranscript,
-  generateSpeakerSummariesFromTranscriptLines,
-  sendMeetingEmailViaAgent,
-} from "@/lib/agent-client";
-import { diarizeAndTranscribe } from "@/lib/diarize-client";
+import { useDiarizeTranscribeMutation } from "@/hooks/services/use-diarize-transcribe-mutation";
+import { useSummaryMinutesMutation } from "@/hooks/services/use-summary-minutes-mutation";
+import { useUpdateReportMutation } from "@/hooks/services/use-update-report-mutation";
+import { sendMeetingEmailViaAgent } from "@/lib/agent-client";
 import { meetingRecords } from "@/lib/mock/meetings";
 import type {
   AudioInputSource,
@@ -385,6 +383,9 @@ function clearTimer(
 }
 
 export default function WorkspacePage() {
+  const diarizeTranscribeMutation = useDiarizeTranscribeMutation();
+  const summaryMinutesMutation = useSummaryMinutesMutation();
+  const updateReportMutation = useUpdateReportMutation();
   const [inputMode, setInputMode] = useState<AudioInputSource>("upload");
   const [activeMeeting, setActiveMeeting] =
     useState<MeetingRecord>(initialMeeting);
@@ -1107,18 +1108,33 @@ export default function WorkspacePage() {
         void (async () => {
           let summaries: SpeakerSummary[] =
             buildSpeakerSummariesFromSegments(segments);
+          let nextMinutes = "Không có biên bản từ API cho phiên hiện tại.";
 
           setNotice("Đang tạo tóm tắt ý chính theo từng người...");
 
           try {
-            summaries = await generateSpeakerSummariesFromTranscriptLines({
-              transcriptLines: segments.map(
-                (segment) =>
-                  `${segment.speaker} (${segment.startSecond}s - ${segment.endSecond}s): ${segment.text}`,
-              ),
-              sessionId:
-                process.env.NEXT_PUBLIC_AGENT_SPEAKER_SUMMARY_SESSION_ID,
+            const transcriptLinesForChat = segments.length
+              ? segments.map(
+                  (segment) =>
+                    `${segment.speaker} (${segment.startSecond}s - ${segment.endSecond}s): ${segment.text}`,
+                )
+              : rawTranscriptText
+                  .split("\n")
+                  .map((line) => cleanTranscriptLine(line))
+                  .filter((line) => line.length > 0);
+
+            const combinedResult = await summaryMinutesMutation.mutateAsync({
+              transcriptLines: transcriptLinesForChat,
+              model: "qwen3.5-flash-2026-02-23",
             });
+
+            summaries =
+              combinedResult.speakerSummaries.length > 0
+                ? combinedResult.speakerSummaries
+                : summaries;
+            nextMinutes =
+              combinedResult.minutesMarkdown.trim() ||
+              "Không có biên bản từ API cho phiên hiện tại.";
           } catch (error) {
             clearInterval(speakerSummaryTimer);
             markPipelineAsError(
@@ -1159,61 +1175,32 @@ export default function WorkspacePage() {
               return;
             }
 
-            minutesProgress = Math.min(minutesProgress + 10, 92);
+            minutesProgress = Math.min(minutesProgress + 17, 100);
             updatePipelineStep("minutes", (step) => ({
               ...step,
-              status: "running",
+              status: minutesProgress >= 100 ? "completed" : "running",
               progress: minutesProgress,
             }));
-            setProcessingProgress((value) => Math.min(value + 2, 98));
-          }, 240);
+            setProcessingProgress((value) =>
+              Math.min(value + (minutesProgress >= 100 ? 4 : 2), 100),
+            );
 
-          void (async () => {
-            try {
-              const minutesMarkdown = await generateMinutesFromTranscript({
-                rawTranscript: rawTranscriptText,
-                sessionId: process.env.NEXT_PUBLIC_AGENT_MINUTES_SESSION_ID,
-              });
-
-              if (processingRunIdRef.current !== runId) {
-                clearInterval(minutesTimer);
-                return;
-              }
-
-              clearInterval(minutesTimer);
-              updatePipelineStep("minutes", (step) => ({
-                ...step,
-                status: "completed",
-                progress: 100,
-              }));
-              setProcessingProgress(100);
-
-              const nextMinutes =
-                minutesMarkdown.trim() ||
-                "Không có biên bản từ API cho phiên hiện tại.";
-
-              setActiveMeeting((current) => ({
-                ...current,
-                processingStatus: "completed",
-                durationSecond: Math.max(durationSecond, 30),
-                minutes: nextMinutes,
-              }));
-              setMinutesDraft(nextMinutes);
-              setNotice("Xử lý hoàn tất. Biên bản đã được tạo từ API.");
-            } catch (error) {
-              clearInterval(minutesTimer);
-              if (processingRunIdRef.current !== runId) {
-                return;
-              }
-
-              const message =
-                error instanceof Error
-                  ? error.message
-                  : "Không thể gọi API tạo biên bản.";
-
-              markPipelineAsError(`Lỗi tạo biên bản: ${message}`, "minutes");
+            if (minutesProgress < 100) {
+              return;
             }
-          })();
+
+            clearInterval(minutesTimer);
+            setProcessingProgress(100);
+
+            setActiveMeeting((current) => ({
+              ...current,
+              processingStatus: "completed",
+              durationSecond: Math.max(durationSecond, 30),
+              minutes: nextMinutes,
+            }));
+            setMinutesDraft(nextMinutes);
+            setNotice("Xử lý hoàn tất. Biên bản đã được tạo từ API.");
+          }, 120);
         })();
       };
 
@@ -1270,7 +1257,10 @@ export default function WorkspacePage() {
 
         void (async () => {
           try {
-            const apiResult = await diarizeAndTranscribe(sourceAudioFile);
+            const apiResult = await diarizeTranscribeMutation.mutateAsync({
+              file: sourceAudioFile,
+              language: "Vietnamese",
+            });
 
             const transcriptLines = apiResult.rawTranscription
               .map((line) => cleanTranscriptLine(line))
@@ -1306,7 +1296,7 @@ export default function WorkspacePage() {
                 "Không có bản refined từ API cho phiên hiện tại.",
               speakerCount,
               durationSecond: Math.max(durationSecond, current.durationSecond),
-              audioUrl: apiResult.audio_url,
+              audioUrl: apiResult.audioUrl,
               apiRecordId: apiResult.id,
             }));
 
@@ -1567,7 +1557,9 @@ export default function WorkspacePage() {
       return;
     }
 
-    if (!activeMeeting.apiRecordId) {
+    const apiRecordId = activeMeeting.apiRecordId;
+
+    if (!apiRecordId) {
       setMinutesValidationError("Không có ID phiên họp để lưu biên bản.");
       return;
     }
@@ -1578,29 +1570,10 @@ export default function WorkspacePage() {
 
     void (async () => {
       try {
-        const response = await fetch("/api/agent/save-minutes", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            id: activeMeeting.apiRecordId,
-            textContent: parsed.data,
-          }),
+        const result = await updateReportMutation.mutateAsync({
+          id: apiRecordId,
+          textContent: parsed.data,
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result: any = await response.json();
-
-        if (result.status !== "success" || !result.reportUrl) {
-          throw new Error(
-            result.error || "Không thể lấy URL biên bản từ server.",
-          );
-        }
 
         setActiveMeeting((prev) => ({
           ...prev,
@@ -2112,7 +2085,7 @@ export default function WorkspacePage() {
                     {activeMeeting.reportUrl ? (
                       <div className="px-6 pb-3">
                         <div className="flex items-center gap-2 rounded-md border border-emerald-200/50 bg-emerald-50 px-3 py-2 dark:border-emerald-900/50 dark:bg-emerald-950/20">
-                          <CheckCircle2Icon className="size-4 flex-shrink-0 text-emerald-600 dark:text-emerald-400" />
+                          <CheckCircle2Icon className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                           <div className="flex flex-col gap-1">
                             <p className="text-xs font-medium text-emerald-900 dark:text-emerald-200">
                               Biên bản đã lưu

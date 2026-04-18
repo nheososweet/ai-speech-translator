@@ -131,35 +131,32 @@ Lưu ý quan trọng:
 
 ## 8) Kiến trúc tích hợp API
 
-Hệ thống dùng mô hình Frontend -> API nội bộ của Next.js -> API bên ngoài.
+Hệ thống hiện dùng mô hình kết hợp:
+
+1. Frontend gọi trực tiếp Pipeline API (records, diarize/transcribe, chat, update-report) qua service Axios phía client.
+2. Chỉ giữ API nội bộ Next.js cho nghiệp vụ cần che giấu API key (gửi email qua agent).
 
 Ý nghĩa:
 
-1. Frontend không gọi trực tiếp API nhạy cảm.
-2. API key được giữ ở server route.
-3. Dễ chuẩn hóa dữ liệu lỗi và timeout.
+1. Luồng xử lý chính đơn giản hơn, ít lớp proxy trung gian.
+2. API key nhạy cảm vẫn được giữ ở server route.
+3. Dễ tách biệt service layer và hook layer theo nghiệp vụ.
 
-### 8.1 Nhóm API records
+### 8.1 Luồng Pipeline gọi trực tiếp
 
-1. GET /api/records
+1. GET /records
    - Lấy danh sách bản ghi từ API nguồn.
-2. POST /api/records/diarize-transcribe
-   - Upload file audio lên API nguồn để diarize + transcribe.
-3. GET /api/records/transcript?url=...
-   - Đọc nội dung transcript/biên bản từ URL nguồn.
-4. GET /api/records/download?url=...&filename=...
-   - Tải file từ URL nguồn, trả về file download.
+2. POST /diarize-and-transcribe
+   - Upload file audio để diarize + transcribe.
+3. POST /chat
+   - Sinh đồng thời tóm tắt theo người nói + biên bản từ transcript.
+4. POST /update-report
+   - Lưu biên bản và lấy report URL.
 
-### 8.2 Nhóm API agent
+### 8.2 API nội bộ còn sử dụng
 
-1. POST /api/agent/minutes
-   - Gọi agent sinh biên bản từ transcript.
-2. POST /api/agent/speaker-summary
-   - Gọi agent tóm tắt theo người nói.
-3. POST /api/agent/send-email
-   - Gọi agent thực hiện gửi email.
-4. POST /api/agent/save-minutes
-   - Lưu biên bản về hệ thống nguồn và lấy report URL.
+1. POST /api/agent/send-email
+   - Gọi agent thực hiện gửi email biên bản.
 
 ## 9) Biến môi trường cần cấu hình
 
@@ -171,8 +168,8 @@ Ví dụ tham khảo:
 # Domain chính dùng cho metadata SEO
 NEXT_PUBLIC_SITE_URL=http://localhost:3000
 
-# API nguồn bản ghi/audio/transcript
-UPSTREAM_API_BASE_URL=http://220.130.209.122:41432
+# API nguồn bản ghi/audio/transcript (frontend gọi trực tiếp)
+NEXT_PUBLIC_PIPELINE_API_BASE_URL=http://220.130.209.122:41432
 
 # API agent (nếu không khai báo sẽ dùng default trong lib/agent-config.ts)
 AGENT_EXTERNAL_API_URL=https://agent.svisor.vn/api/external/chat
@@ -180,14 +177,10 @@ AGENT_EXTERNAL_API_URL=https://agent.svisor.vn/api/external/chat
 # Hoặc alias cũ (fallback)
 AGENT_API_URL=
 
-# API key cho từng nghiệp vụ agent
-AGENT_MINUTES_API_KEY=
-AGENT_SPEAKER_SUMMARY_API_KEY=
+# API key cho nghiệp vụ agent gửi email
 AGENT_MOM_EMAIL_API_KEY=
 
 # Session id public để phân luồng hội thoại agent
-NEXT_PUBLIC_AGENT_MINUTES_SESSION_ID=my-session-001
-NEXT_PUBLIC_AGENT_SPEAKER_SUMMARY_SESSION_ID=my-speaker-summary-session-001
 NEXT_PUBLIC_AGENT_MOM_EMAIL_SESSION_ID=my-send-email-agent-session-001
 ```
 
